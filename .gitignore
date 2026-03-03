@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.pyc
+
+# Keep folder, ignore local model weights/artifacts
+paligemma-weights/*
+!paligemma-weights/.gitkeep
