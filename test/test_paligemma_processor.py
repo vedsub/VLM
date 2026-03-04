@@ -22,6 +22,17 @@ def test_build_prompt_format() -> None:
     assert prompt.endswith("\n")
 
 
+def test_processor_loads_model_config_token_fields() -> None:
+    processor = PaliGemmaProcessor.from_pretrained("paligemma-weights")
+
+    assert processor.image_seq_length == 256
+    assert processor.image_token_index == 257152
+    assert processor.image_token_id == 257152
+    assert processor.bos_token_id == 2
+    assert processor.eos_token_id == 1
+    assert processor.pad_token_id == 0
+
+
 def test_build_prompt_normalizes_existing_markers() -> None:
     processor = PaliGemmaProcessor.from_pretrained("paligemma-weights")
     raw = "<image><image><bos>What instrument is shown in this picture?\n"

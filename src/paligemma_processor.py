@@ -28,6 +28,10 @@ class PaliGemmaProcessor:
         do_normalize: bool = True,
         do_convert_rgb: bool | None = True,
         image_token: str = "<image>",
+        image_token_index: int | None = None,
+        bos_token_id: int | None = None,
+        eos_token_id: int | None = None,
+        pad_token_id: int | None = None,
     ) -> None:
         self.tokenizer = tokenizer
         self.image_size = image_size
@@ -40,11 +44,24 @@ class PaliGemmaProcessor:
         self.do_normalize = bool(do_normalize)
         self.do_convert_rgb = True if do_convert_rgb is None else bool(do_convert_rgb)
         self.image_token = image_token
+        self.image_token_index = image_token_index
+        self.bos_token_id = bos_token_id
+        self.eos_token_id = eos_token_id
+        self.pad_token_id = pad_token_id
 
         if hasattr(self.tokenizer, "add_bos_token"):
             self.tokenizer.add_bos_token = False
         if hasattr(self.tokenizer, "add_eos_token"):
             self.tokenizer.add_eos_token = False
+
+        if self.image_token_index is not None:
+            tokenized_image_id = self.tokenizer.convert_tokens_to_ids(self.image_token)
+            if int(tokenized_image_id) != int(self.image_token_index):
+                raise ValueError(
+                    "Tokenizer image token id does not match model config: "
+                    f"tokenizer({self.image_token})={tokenized_image_id}, "
+                    f"config.image_token_index={self.image_token_index}."
+                )
 
     @classmethod
     def from_pretrained(
@@ -84,10 +101,24 @@ class PaliGemmaProcessor:
 
         size_obj = preprocessor_config.get("size", {})
         image_size = int(size_obj.get("height", size_obj.get("width", 224)))
+        text_num_image_tokens = model_config.get("text_config", {}).get("num_image_tokens")
+        vision_num_image_tokens = model_config.get("vision_config", {}).get("num_image_tokens")
+        if (
+            text_num_image_tokens is not None
+            and vision_num_image_tokens is not None
+            and int(text_num_image_tokens) != int(vision_num_image_tokens)
+        ):
+            raise ValueError(
+                "Model config mismatch: text_config.num_image_tokens "
+                f"({text_num_image_tokens}) != vision_config.num_image_tokens "
+                f"({vision_num_image_tokens})."
+            )
         image_seq_length = int(
             preprocessor_config.get(
                 "image_seq_length",
-                model_config.get("vision_config", {}).get("num_image_tokens", 256),
+                text_num_image_tokens
+                if text_num_image_tokens is not None
+                else model_config.get("vision_config", {}).get("num_image_tokens", 256),
             )
         )
 
@@ -118,6 +149,10 @@ class PaliGemmaProcessor:
                 "do_convert_rgb", preprocessor_config.get("do_convert_rgb", True)
             ),
             image_token=processor_overrides.get("image_token", "<image>"),
+            image_token_index=model_config.get("image_token_index"),
+            bos_token_id=model_config.get("bos_token_id"),
+            eos_token_id=model_config.get("eos_token_id"),
+            pad_token_id=model_config.get("pad_token_id"),
         )
 
     @property
