@@ -127,6 +127,16 @@ class PaliGemmaProcessor:
             raise ValueError(f"Tokenizer does not recognize image token {self.image_token!r}.")
         return int(token_id)
 
+    @property
+    def bos_token(self) -> str:
+        return self.tokenizer.bos_token or "<bos>"
+
+    def _strip_prompt_markers(self, prompt: str) -> str:
+        clean = prompt.rstrip("\n")
+        clean = clean.replace(self.image_token, "")
+        clean = clean.replace(self.bos_token, "")
+        return clean.strip()
+
     def _ensure_text_list(self, text: TextInput) -> list[str]:
         if isinstance(text, str):
             return [text]
@@ -213,11 +223,14 @@ class PaliGemmaProcessor:
             return pixel_values.numpy()
         raise ValueError(f"Unsupported return_tensors={return_tensors!r}. Expected 'pt' or 'np'.")
 
-    def build_prompt(self, prompt: str) -> str:
-        clean_prompt = prompt.rstrip("\n")
-        image_prefix = self.image_token * self.image_seq_length
-        bos_token = self.tokenizer.bos_token or "<bos>"
-        return f"{image_prefix}{bos_token}{clean_prompt}\n"
+    def build_prompt(self, prompt: str, image_token_count: int | None = None) -> str:
+        token_count = self.image_seq_length if image_token_count is None else int(image_token_count)
+        if token_count <= 0:
+            raise ValueError(f"image_token_count must be > 0, got {token_count}.")
+
+        clean_prompt = self._strip_prompt_markers(prompt)
+        image_prefix = self.image_token * token_count
+        return f"{image_prefix}{self.bos_token}{clean_prompt}\n"
 
     def __call__(
         self,
@@ -227,13 +240,14 @@ class PaliGemmaProcessor:
         padding: str | bool = "longest",
         truncation: bool = False,
         max_length: int | None = None,
+        image_token_count: int | None = None,
         **tokenizer_kwargs: Any,
     ) -> dict[str, Any]:
         texts = self._ensure_text_list(text)
         image_list = self._ensure_image_list(images)
         texts, image_list = self._align_batch(texts, image_list)
 
-        prompts = [self.build_prompt(prompt) for prompt in texts]
+        prompts = [self.build_prompt(prompt, image_token_count=image_token_count) for prompt in texts]
         tokenized = self.tokenizer(
             prompts,
             padding=padding,
