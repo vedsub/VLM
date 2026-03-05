@@ -9,6 +9,21 @@ from torch import Tensor, nn
 from torch.nn import functional as F
 
 
+class RMSNorm(nn.Module):
+    def __init__(self, hidden_size: int, eps: float = 1e-6) -> None:
+        super().__init__()
+        self.hidden_size = int(hidden_size)
+        self.eps = float(eps)
+        self.weight = nn.Parameter(torch.ones(self.hidden_size))
+
+    def forward(self, hidden_states: Tensor) -> Tensor:
+        input_dtype = hidden_states.dtype
+        hidden_states = hidden_states.to(torch.float32)
+        variance = hidden_states.pow(2).mean(dim=-1, keepdim=True)
+        hidden_states = hidden_states * torch.rsqrt(variance + self.eps)
+        return hidden_states.to(input_dtype) * self.weight.to(input_dtype)
+
+
 def rotate_half(x: Tensor) -> Tensor:
     if x.shape[-1] % 2 != 0:
         raise ValueError(f"RoPE requires an even head_dim, got {x.shape[-1]}.")
@@ -289,9 +304,9 @@ class SiglipMLP(nn.Module):
 class SiglipEncoderLayer(nn.Module):
     def __init__(self, config: SiglipVisionConfig) -> None:
         super().__init__()
-        self.layer_norm1 = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.layer_norm1 = RMSNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.self_attn = SiglipAttention(config)
-        self.layer_norm2 = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.layer_norm2 = RMSNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.mlp = SiglipMLP(config)
         self.dropout = config.hidden_dropout
 
@@ -356,7 +371,7 @@ class SiglipVisionTransformer(nn.Module):
         self.config = config
         self.embeddings = SiglipVisionEmbeddings(config)
         self.encoder = SiglipEncoder(config)
-        self.post_layernorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.post_layernorm = RMSNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.use_head = config.vision_use_head
 
         if self.use_head:
@@ -420,8 +435,9 @@ class SiglipVisionModel(nn.Module):
                 module.bias.data.zero_()
             return
 
-        if isinstance(module, nn.LayerNorm):
-            module.bias.data.zero_()
+        if isinstance(module, (nn.LayerNorm, RMSNorm)):
+            if getattr(module, "bias", None) is not None:
+                module.bias.data.zero_()
             module.weight.data.fill_(1.0)
 
     def get_input_embeddings(self) -> nn.Module:

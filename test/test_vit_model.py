@@ -2,6 +2,7 @@ import torch
 
 from src.vit_model import (
     RotaryEmbedding,
+    RMSNorm,
     SiglipAttention,
     SiglipVisionConfig,
     SiglipVisionModel,
@@ -150,3 +151,32 @@ def test_siglip_config_rejects_invalid_num_key_value_heads() -> None:
         raise AssertionError(
             "Expected ValueError when num_attention_heads is not divisible by num_key_value_heads."
         )
+
+
+def test_rms_norm_matches_manual_computation() -> None:
+    norm = RMSNorm(hidden_size=4, eps=1e-6)
+    norm.weight.data = torch.tensor([1.0, 2.0, 3.0, 4.0])
+    x = torch.tensor([[[1.0, 2.0, 3.0, 4.0]]])
+
+    out = norm(x)
+    variance = x.pow(2).mean(dim=-1, keepdim=True)
+    expected = (x * torch.rsqrt(variance + 1e-6)) * norm.weight
+
+    assert torch.allclose(out, expected, atol=1e-6)
+
+
+def test_siglip_model_uses_rmsnorm_layers() -> None:
+    config = SiglipVisionConfig(
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        image_size=32,
+        patch_size=16,
+    )
+    model = SiglipVisionModel(config)
+    layer = model.vision_model.encoder.layers[0]
+
+    assert isinstance(layer.layer_norm1, RMSNorm)
+    assert isinstance(layer.layer_norm2, RMSNorm)
+    assert isinstance(model.vision_model.post_layernorm, RMSNorm)
