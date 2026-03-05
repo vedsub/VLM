@@ -9,6 +9,61 @@ from torch import Tensor, nn
 from torch.nn import functional as F
 
 
+def rotate_half(x: Tensor) -> Tensor:
+    if x.shape[-1] % 2 != 0:
+        raise ValueError(f"RoPE requires an even head_dim, got {x.shape[-1]}.")
+    half = x.shape[-1] // 2
+    x1 = x[..., :half]
+    x2 = x[..., half:]
+    return torch.cat((-x2, x1), dim=-1)
+
+
+def apply_rotary_pos_emb(
+    query_states: Tensor,
+    key_states: Tensor,
+    cos: Tensor,
+    sin: Tensor,
+) -> Tuple[Tensor, Tensor]:
+    if query_states.ndim != 4 or key_states.ndim != 4:
+        raise ValueError("query_states and key_states must be 4D tensors (batch, heads, seq, head_dim).")
+    if cos.ndim != 3 or sin.ndim != 3:
+        raise ValueError("cos and sin must be 3D tensors (batch, seq, head_dim).")
+
+    cos = cos.unsqueeze(1)
+    sin = sin.unsqueeze(1)
+    query_states = (query_states * cos) + (rotate_half(query_states) * sin)
+    key_states = (key_states * cos) + (rotate_half(key_states) * sin)
+    return query_states, key_states
+
+
+class RotaryEmbedding(nn.Module):
+    def __init__(self, dim: int, base: float = 10000.0) -> None:
+        super().__init__()
+        if dim % 2 != 0:
+            raise ValueError(f"RoPE requires an even head_dim, got {dim}.")
+        self.dim = dim
+        self.base = float(base)
+        inv_freq = 1.0 / (
+            self.base
+            ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim)
+        )
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
+
+    def forward(self, position_ids: Tensor, dtype: torch.dtype) -> Tuple[Tensor, Tensor]:
+        if position_ids.ndim != 2:
+            raise ValueError(f"position_ids must be 2D (batch, seq), got shape {tuple(position_ids.shape)}.")
+
+        freqs = torch.einsum(
+            "bs,d->bsd",
+            position_ids.to(device=self.inv_freq.device, dtype=self.inv_freq.dtype),
+            self.inv_freq,
+        )
+        emb = torch.cat((freqs, freqs), dim=-1)
+        cos = emb.cos().to(dtype=dtype)
+        sin = emb.sin().to(dtype=dtype)
+        return cos, sin
+
+
 class QuickGELU(nn.Module):
     def forward(self, hidden_states: Tensor) -> Tensor:
         return hidden_states * torch.sigmoid(1.702 * hidden_states)
@@ -112,31 +167,7 @@ class SiglipVisionEmbeddings(nn.Module):
             stride=config.patch_size,
             bias=True,
         )
-        self.num_positions = config.num_image_tokens
-        self.position_embedding = nn.Embedding(self.num_positions, config.hidden_size)
         self.dropout = nn.Dropout(config.hidden_dropout)
-        self.register_buffer(
-            "position_ids",
-            torch.arange(self.num_positions).expand((1, -1)),
-            persistent=False,
-        )
-
-    def _interpolate_position_embeddings(self, height: int, width: int) -> Tensor:
-        num_positions = self.num_positions
-        grid_size = int(math.sqrt(num_positions))
-        if grid_size * grid_size != num_positions:
-            raise ValueError("Cannot interpolate positional embeddings for non-square patch grids.")
-
-        position_embeddings = self.position_embedding.weight.reshape(
-            1, grid_size, grid_size, self.config.hidden_size
-        ).permute(0, 3, 1, 2)
-        position_embeddings = F.interpolate(
-            position_embeddings,
-            size=(height, width),
-            mode="bicubic",
-            align_corners=False,
-        )
-        return position_embeddings.permute(0, 2, 3, 1).reshape(1, height * width, -1)
 
     def forward(self, pixel_values: Tensor, interpolate_pos_encoding: bool = False) -> Tensor:
         if pixel_values.ndim != 4:
@@ -144,26 +175,9 @@ class SiglipVisionEmbeddings(nn.Module):
                 f"pixel_values must be 4D (batch, channels, height, width), got {pixel_values.ndim}D."
             )
 
+        _ = interpolate_pos_encoding  # Kept for API compatibility.
         patch_embeds = self.patch_embedding(pixel_values)
-        height, width = patch_embeds.shape[-2:]
         embeddings = patch_embeds.flatten(2).transpose(1, 2)
-
-        if embeddings.shape[1] == self.num_positions:
-            position_embeddings = self.position_embedding(self.position_ids)
-        elif interpolate_pos_encoding:
-            position_embeddings = self._interpolate_position_embeddings(height, width)
-        else:
-            expected = int(math.sqrt(self.num_positions)) * self.config.patch_size
-            raise ValueError(
-                f"Input image produced {embeddings.shape[1]} patches, but model expects "
-                f"{self.num_positions}. Use image_size={expected} or set "
-                "interpolate_pos_encoding=True."
-            )
-
-        embeddings = embeddings + position_embeddings.to(
-            device=embeddings.device,
-            dtype=embeddings.dtype,
-        )
         return self.dropout(embeddings)
 
 
@@ -180,6 +194,7 @@ class SiglipAttention(nn.Module):
         self.k_proj = nn.Linear(self.embed_dim, self.embed_dim)
         self.v_proj = nn.Linear(self.embed_dim, self.embed_dim)
         self.out_proj = nn.Linear(self.embed_dim, self.embed_dim)
+        self.rotary_emb = RotaryEmbedding(dim=self.head_dim)
 
     def forward(
         self,
@@ -197,6 +212,15 @@ class SiglipAttention(nn.Module):
         value_states = self.v_proj(hidden_states).view(
             batch_size, seq_len, self.num_heads, self.head_dim
         ).transpose(1, 2)
+
+        position_ids = torch.arange(seq_len, device=hidden_states.device).unsqueeze(0).expand(batch_size, -1)
+        cos, sin = self.rotary_emb(position_ids=position_ids, dtype=query_states.dtype)
+        query_states, key_states = apply_rotary_pos_emb(
+            query_states=query_states,
+            key_states=key_states,
+            cos=cos,
+            sin=sin,
+        )
 
         attn_weights = torch.matmul(query_states, key_states.transpose(-1, -2)) * self.scale
         attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
