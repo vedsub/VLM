@@ -2,6 +2,7 @@ import torch
 
 from src.vit_model import (
     RotaryEmbedding,
+    SiglipAttention,
     SiglipVisionConfig,
     SiglipVisionModel,
     apply_rotary_pos_emb,
@@ -94,3 +95,58 @@ def test_apply_rotary_pos_emb_changes_nonzero_positions() -> None:
     assert torch.allclose(k_rot[:, :, 0, :], k[:, :, 0, :], atol=1e-6)
     assert not torch.allclose(q_rot[:, :, 1, :], q[:, :, 1, :], atol=1e-6)
     assert not torch.allclose(k_rot[:, :, 1, :], k[:, :, 1, :], atol=1e-6)
+
+
+def test_siglip_attention_grouped_query_attention_shapes() -> None:
+    config = SiglipVisionConfig(
+        hidden_size=48,
+        intermediate_size=96,
+        num_hidden_layers=1,
+        num_attention_heads=6,
+        num_key_value_heads=2,
+        image_size=32,
+        patch_size=16,
+    )
+    attn = SiglipAttention(config)
+    hidden_states = torch.randn(2, 4, 48)
+    attn_output, attn_probs = attn(hidden_states, output_attentions=True)
+
+    assert attn.k_proj.out_features == 16
+    assert attn.v_proj.out_features == 16
+    assert attn_output.shape == (2, 4, 48)
+    assert attn_probs is not None
+    assert attn_probs.shape == (2, 6, 4, 4)
+
+
+def test_siglip_config_rejects_invalid_num_key_value_heads() -> None:
+    try:
+        SiglipVisionConfig(
+            hidden_size=48,
+            intermediate_size=96,
+            num_hidden_layers=1,
+            num_attention_heads=6,
+            num_key_value_heads=8,
+            image_size=32,
+            patch_size=16,
+        )
+    except ValueError as exc:
+        assert "cannot exceed" in str(exc)
+    else:
+        raise AssertionError("Expected ValueError when num_key_value_heads > num_attention_heads.")
+
+    try:
+        SiglipVisionConfig(
+            hidden_size=48,
+            intermediate_size=96,
+            num_hidden_layers=1,
+            num_attention_heads=6,
+            num_key_value_heads=4,
+            image_size=32,
+            patch_size=16,
+        )
+    except ValueError as exc:
+        assert "divisible" in str(exc)
+    else:
+        raise AssertionError(
+            "Expected ValueError when num_attention_heads is not divisible by num_key_value_heads."
+        )

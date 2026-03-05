@@ -88,6 +88,7 @@ class SiglipVisionConfig:
     intermediate_size: int = 4304
     num_hidden_layers: int = 27
     num_attention_heads: int = 16
+    num_key_value_heads: Optional[int] = None
     num_channels: int = 3
     image_size: Optional[int] = None
     patch_size: int = 14
@@ -107,6 +108,22 @@ class SiglipVisionConfig:
             raise ValueError(
                 "hidden_size must be divisible by num_attention_heads, got "
                 f"hidden_size={self.hidden_size}, num_attention_heads={self.num_attention_heads}"
+            )
+        if self.num_key_value_heads is None:
+            self.num_key_value_heads = self.num_attention_heads
+        if self.num_key_value_heads <= 0:
+            raise ValueError(
+                f"num_key_value_heads must be > 0, got {self.num_key_value_heads}."
+            )
+        if self.num_key_value_heads > self.num_attention_heads:
+            raise ValueError(
+                "num_key_value_heads cannot exceed num_attention_heads, got "
+                f"{self.num_key_value_heads} > {self.num_attention_heads}."
+            )
+        if self.num_attention_heads % self.num_key_value_heads != 0:
+            raise ValueError(
+                "num_attention_heads must be divisible by num_key_value_heads, got "
+                f"{self.num_attention_heads} and {self.num_key_value_heads}."
             )
 
         if self.image_size is not None and self.image_size % self.patch_size != 0:
@@ -186,15 +203,33 @@ class SiglipAttention(nn.Module):
         super().__init__()
         self.embed_dim = config.hidden_size
         self.num_heads = config.num_attention_heads
+        self.num_key_value_heads = int(config.num_key_value_heads)
+        self.num_key_value_groups = self.num_heads // self.num_key_value_heads
         self.head_dim = self.embed_dim // self.num_heads
         self.scale = self.head_dim**-0.5
         self.dropout = config.attention_dropout
 
         self.q_proj = nn.Linear(self.embed_dim, self.embed_dim)
-        self.k_proj = nn.Linear(self.embed_dim, self.embed_dim)
-        self.v_proj = nn.Linear(self.embed_dim, self.embed_dim)
+        self.k_proj = nn.Linear(self.embed_dim, self.num_key_value_heads * self.head_dim)
+        self.v_proj = nn.Linear(self.embed_dim, self.num_key_value_heads * self.head_dim)
         self.out_proj = nn.Linear(self.embed_dim, self.embed_dim)
         self.rotary_emb = RotaryEmbedding(dim=self.head_dim)
+
+    @staticmethod
+    def _repeat_kv(hidden_states: Tensor, n_rep: int) -> Tensor:
+        if n_rep <= 0:
+            raise ValueError(f"n_rep must be > 0, got {n_rep}.")
+        if hidden_states.ndim != 4:
+            raise ValueError(
+                "hidden_states must be 4D (batch, num_kv_heads, seq_len, head_dim)."
+            )
+        if n_rep == 1:
+            return hidden_states
+        batch_size, num_kv_heads, seq_len, head_dim = hidden_states.shape
+        hidden_states = hidden_states[:, :, None, :, :].expand(
+            batch_size, num_kv_heads, n_rep, seq_len, head_dim
+        )
+        return hidden_states.reshape(batch_size, num_kv_heads * n_rep, seq_len, head_dim)
 
     def forward(
         self,
@@ -207,10 +242,10 @@ class SiglipAttention(nn.Module):
             batch_size, seq_len, self.num_heads, self.head_dim
         ).transpose(1, 2)
         key_states = self.k_proj(hidden_states).view(
-            batch_size, seq_len, self.num_heads, self.head_dim
+            batch_size, seq_len, self.num_key_value_heads, self.head_dim
         ).transpose(1, 2)
         value_states = self.v_proj(hidden_states).view(
-            batch_size, seq_len, self.num_heads, self.head_dim
+            batch_size, seq_len, self.num_key_value_heads, self.head_dim
         ).transpose(1, 2)
 
         position_ids = torch.arange(seq_len, device=hidden_states.device).unsqueeze(0).expand(batch_size, -1)
@@ -221,6 +256,8 @@ class SiglipAttention(nn.Module):
             cos=cos,
             sin=sin,
         )
+        key_states = self._repeat_kv(key_states, self.num_key_value_groups)
+        value_states = self._repeat_kv(value_states, self.num_key_value_groups)
 
         attn_weights = torch.matmul(query_states, key_states.transpose(-1, -2)) * self.scale
         attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
