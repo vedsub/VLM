@@ -6,7 +6,9 @@ from .gemma_model import (
     GemmaMLP,
     GemmaRMSNorm,
     KVCache,
+    PaliGemmaMultiModalProjector,
     PaliGemmaConfig,
+    merge_text_and_image_embeddings,
 )
 from .paligemma_processor import PaliGemmaProcessor
 from .vit_model import SiglipVisionConfig, SiglipVisionModel, SiglipVisionModelOutput
@@ -19,9 +21,11 @@ __all__ = [
     "GemmaMLP",
     "GemmaRMSNorm",
     "KVCache",
+    "PaliGemmaMultiModalProjector",
     "PaliGemmaConfig",
     "PaliGemmaProcessor",
     "SiglipVisionConfig",
     "SiglipVisionModel",
     "SiglipVisionModelOutput",
+    "merge_text_and_image_embeddings",
 ]

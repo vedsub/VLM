@@ -685,3 +685,81 @@ class PaliGemmaConfig:
         if self._name_or_path is not None:
             output["_name_or_path"] = self._name_or_path
         return output
+
+
+class PaliGemmaMultiModalProjector(nn.Module):
+    def __init__(self, config: PaliGemmaConfig) -> None:
+        super().__init__()
+        vision_hidden_size = int(config.vision_config.hidden_size)
+        projection_dim = int(config.projection_dim or config.hidden_size or config.text_config.hidden_size)
+        text_hidden_size = int(config.text_config.hidden_size)
+        if projection_dim != text_hidden_size:
+            raise ValueError(
+                "projection_dim must match text hidden_size for multimodal fusion, got "
+                f"projection_dim={projection_dim}, text_hidden_size={text_hidden_size}."
+            )
+
+        self.projection = nn.Linear(vision_hidden_size, projection_dim, bias=True)
+
+    def forward(self, image_features: torch.Tensor) -> torch.Tensor:
+        if image_features.ndim != 3:
+            raise ValueError(
+                "image_features must be 3D (batch, num_image_tokens, vision_hidden_size), got shape "
+                f"{tuple(image_features.shape)}."
+            )
+        return self.projection(image_features)
+
+
+def merge_text_and_image_embeddings(
+    input_ids: torch.LongTensor,
+    inputs_embeds: torch.Tensor,
+    image_features: torch.Tensor,
+    image_token_index: int,
+) -> torch.Tensor:
+    if input_ids.ndim != 2:
+        raise ValueError(f"input_ids must be 2D (batch, seq_len), got shape {tuple(input_ids.shape)}.")
+    if inputs_embeds.ndim != 3:
+        raise ValueError(
+            f"inputs_embeds must be 3D (batch, seq_len, hidden_size), got shape {tuple(inputs_embeds.shape)}."
+        )
+    if image_features.ndim != 3:
+        raise ValueError(
+            "image_features must be 3D (batch, num_image_tokens, hidden_size), got shape "
+            f"{tuple(image_features.shape)}."
+        )
+
+    batch_size, seq_len = input_ids.shape
+    embed_batch, embed_seq_len, hidden_size = inputs_embeds.shape
+    image_batch, num_image_tokens, image_hidden_size = image_features.shape
+
+    if embed_batch != batch_size or embed_seq_len != seq_len:
+        raise ValueError(
+            "input_ids and inputs_embeds shape mismatch: "
+            f"input_ids={tuple(input_ids.shape)}, inputs_embeds={tuple(inputs_embeds.shape)}."
+        )
+    if image_batch != batch_size:
+        raise ValueError(
+            "image_features batch mismatch: "
+            f"input_ids batch={batch_size}, image_features batch={image_batch}."
+        )
+    if image_hidden_size != hidden_size:
+        raise ValueError(
+            "Hidden size mismatch while merging text/image embeddings: "
+            f"inputs_embeds hidden_size={hidden_size}, image_features hidden_size={image_hidden_size}."
+        )
+
+    image_token_mask = input_ids == int(image_token_index)
+    per_sample_counts = image_token_mask.sum(dim=-1)
+    expected_counts = torch.full_like(per_sample_counts, fill_value=num_image_tokens)
+    if not torch.equal(per_sample_counts, expected_counts):
+        raise ValueError(
+            "Each sample must contain exactly num_image_tokens image placeholders before merge: "
+            f"expected {num_image_tokens}, got {per_sample_counts.tolist()}."
+        )
+
+    merged = inputs_embeds.clone()
+    merged[image_token_mask] = image_features.to(
+        device=inputs_embeds.device,
+        dtype=inputs_embeds.dtype,
+    ).reshape(-1, hidden_size)
+    return merged

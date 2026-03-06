@@ -9,7 +9,11 @@ from src.gemma_model import (
     GemmaModel,
     GemmaRMSNorm,
     KVCache,
+    PaliGemmaConfig,
+    PaliGemmaMultiModalProjector,
+    merge_text_and_image_embeddings,
 )
+from src.vit_model import SiglipVisionConfig
 
 
 def test_gemma_rms_norm_matches_manual_formula() -> None:
@@ -129,3 +133,67 @@ def test_gemma_model_cache_aware_decoding_step() -> None:
     assert outputs.attentions is not None
     assert outputs.attentions[0] is not None
     assert outputs.attentions[0].shape == (2, 4, 1, 4)
+
+
+def test_multimodal_projector_aligns_vision_and_text_hidden_sizes() -> None:
+    config = PaliGemmaConfig(
+        vision_config=SiglipVisionConfig(
+            hidden_size=12,
+            intermediate_size=24,
+            num_hidden_layers=1,
+            num_attention_heads=3,
+            num_key_value_heads=3,
+            image_size=28,
+            patch_size=14,
+            num_image_tokens=4,
+            vision_use_head=False,
+            projection_dim=16,
+        ),
+        text_config=GemmaConfig(
+            vocab_size=64,
+            hidden_size=16,
+            intermediate_size=32,
+            num_hidden_layers=1,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            num_image_tokens=4,
+        ),
+        hidden_size=16,
+        projection_dim=16,
+    )
+    projector = PaliGemmaMultiModalProjector(config)
+    vision_features = torch.randn(2, 4, 12)
+    projected = projector(vision_features)
+    assert projected.shape == (2, 4, 16)
+
+
+def test_merge_text_and_image_embeddings_replaces_image_token_slots() -> None:
+    image_token_index = 99
+    input_ids = torch.tensor(
+        [
+            [99, 99, 5, 6, 7],
+            [99, 99, 8, 9, 10],
+        ],
+        dtype=torch.long,
+    )
+    inputs_embeds = torch.zeros(2, 5, 4, dtype=torch.float32)
+    image_features = torch.tensor(
+        [
+            [[1.0, 2.0, 3.0, 4.0], [10.0, 20.0, 30.0, 40.0]],
+            [[-1.0, -2.0, -3.0, -4.0], [-10.0, -20.0, -30.0, -40.0]],
+        ],
+        dtype=torch.float32,
+    )
+
+    merged = merge_text_and_image_embeddings(
+        input_ids=input_ids,
+        inputs_embeds=inputs_embeds,
+        image_features=image_features,
+        image_token_index=image_token_index,
+    )
+
+    assert torch.allclose(merged[0, 0], image_features[0, 0])
+    assert torch.allclose(merged[0, 1], image_features[0, 1])
+    assert torch.allclose(merged[1, 0], image_features[1, 0])
+    assert torch.allclose(merged[1, 1], image_features[1, 1])
+    assert torch.allclose(merged[:, 2:, :], torch.zeros(2, 3, 4))

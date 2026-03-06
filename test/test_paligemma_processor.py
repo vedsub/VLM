@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+import torch
 from PIL import Image
 
 from src.paligemma_processor import PaliGemmaProcessor
@@ -92,3 +93,32 @@ def test_processor_allows_custom_image_token_count() -> None:
     input_ids = model_inputs["input_ids"]
     assert (input_ids[0, :image_token_count] == processor.image_token_id).all()
     assert int(input_ids[0, image_token_count]) == processor.tokenizer.bos_token_id
+
+
+def test_processor_builds_text_image_padding_masks_from_input_ids() -> None:
+    processor = PaliGemmaProcessor.from_pretrained("paligemma-weights")
+    image = _dummy_image()
+
+    model_inputs = processor(
+        text=["short", "this is a longer prompt to force padding"],
+        images=image,
+        return_tensors="pt",
+        padding="longest",
+    )
+
+    input_ids = model_inputs["input_ids"]
+    text_mask = model_inputs["text_mask"]
+    image_mask = model_inputs["image_mask"]
+    padding_mask = model_inputs["padding_mask"]
+
+    assert text_mask.shape == input_ids.shape
+    assert image_mask.shape == input_ids.shape
+    assert padding_mask.shape == input_ids.shape
+
+    expected_image = input_ids == processor.image_token_id
+    expected_padding = input_ids == processor.pad_token_id
+    expected_text = (~expected_image) & (~expected_padding)
+
+    assert torch.equal(image_mask, expected_image)
+    assert torch.equal(padding_mask, expected_padding)
+    assert torch.equal(text_mask, expected_text)

@@ -258,6 +258,42 @@ class PaliGemmaProcessor:
             return pixel_values.numpy()
         raise ValueError(f"Unsupported return_tensors={return_tensors!r}. Expected 'pt' or 'np'.")
 
+    def build_input_masks(
+        self,
+        input_ids: torch.Tensor | np.ndarray,
+    ) -> dict[str, torch.Tensor | np.ndarray]:
+        if input_ids.ndim != 2:
+            raise ValueError(
+                f"input_ids must be 2D with shape (batch_size, seq_length), got {tuple(input_ids.shape)}."
+            )
+
+        image_token_id = int(self.image_token_id)
+        pad_token_id = (
+            int(self.pad_token_id)
+            if self.pad_token_id is not None
+            else (
+                int(self.tokenizer.pad_token_id)
+                if getattr(self.tokenizer, "pad_token_id", None) is not None
+                else None
+            )
+        )
+
+        image_mask = input_ids == image_token_id
+        if pad_token_id is None:
+            if isinstance(input_ids, torch.Tensor):
+                padding_mask = torch.zeros_like(input_ids, dtype=torch.bool)
+            else:
+                padding_mask = np.zeros_like(input_ids, dtype=bool)
+        else:
+            padding_mask = input_ids == pad_token_id
+        text_mask = (~image_mask) & (~padding_mask)
+
+        return {
+            "text_mask": text_mask,
+            "image_mask": image_mask,
+            "padding_mask": padding_mask,
+        }
+
     def build_prompt(self, prompt: str, image_token_count: int | None = None) -> str:
         token_count = self.image_seq_length if image_token_count is None else int(image_token_count)
         if token_count <= 0:
@@ -292,6 +328,8 @@ class PaliGemmaProcessor:
             return_tensors=return_tensors,
             **tokenizer_kwargs,
         )
+        token_masks = self.build_input_masks(tokenized["input_ids"])
+        tokenized.update(token_masks)
         tokenized["pixel_values"] = self.process_images(image_list, return_tensors=return_tensors)
         return tokenized
 
